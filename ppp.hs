@@ -1,6 +1,15 @@
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
+{-# HLINT ignore "Use newtype instead of data" #-}
+{-# HLINT ignore "Use tuple-section" #-}
+{-# HLINT ignore "Use foldr" #-}
+{-# HLINT ignore "Use <$>" #-}
+
+import Data.Either (rights)
 import Data.List
-import Data.Maybe (catMaybes, mapMaybe)
-import Text.XHtml (table)
+import Data.Maybe (mapMaybe)
+import GHC.Exts.Heap (GenClosure (fun))
+import Text.Parsec hiding (State)
 
 data Rose a = Node a [Rose a] deriving (Show)
 
@@ -55,8 +64,8 @@ instance Show Table where
   show (Table i j state _) = drop 1 (prikazi i j state)
 
 prikazi :: Int -> Int -> [[State]] -> String
-prikazi 0 j state = ""
-prikazi i j state = prikazi (i - 1) j state ++ "\n" ++ concatMap crta (state !! (i - 1)) ++ "|"
+prikazi (-1) j state = ""
+prikazi i j state = prikazi (i - 1) j state ++ "\n" ++ concatMap crta (state !! i) ++ "|"
   where
     crta :: State -> String
     crta a = "|" ++ show a
@@ -70,10 +79,11 @@ allValidMoves (Table i j state player) =
         (index, el) <- zip [1 ..] list
     ]
 
-addMove :: Table -> Int -> Maybe Table
+addMove :: Table -> Int -> Either String Table
 addMove table@(Table i j state player) kol
-  | kol `notElem` allValidMoves table = Nothing
-  | otherwise = Just (Table i j mat (other player))
+  | checkIfOver table = Left "Game is already finished"
+  | kol `notElem` allValidMoves table = Left "Bad move"
+  | otherwise = Right (Table i j mat (other player))
   where
     mat = transpose [if index == kol then reverse $ put player kol (reverse kolona) else kolona | (index, kolona) <- zip [1 ..] (transpose state)]
     other Yellow = Red
@@ -93,6 +103,7 @@ checkIfOver (Table i j state player) =
     || or [pobedio row | row <- transpose state]
     || or [pobedio row | row <- leftD i j state]
     || or [pobedio row | row <- rightD i j state]
+    || and [P `notElem` row | row <- state]
 
 pobedio :: [State] -> Bool
 pobedio str = isInfixOf [C, C, C, C] str || isInfixOf [Z, Z, Z, Z] str
@@ -116,5 +127,108 @@ dij1 i j mat = [mat !! (i - ind) !! (j - ind) | ind <- [0 .. min i j], i - ind >
 -- generateRose :: (a -> [a]) -> Int -> a -> Rose a
 
 generateBigTree :: Table -> Int -> Rose Table
--- catMaybes :(
-generateBigTree table dub = generateRose (\tab -> mapMaybe (addMove tab) (allValidMoves tab)) dub table
+generateBigTree table dub = generateRose (\tab -> rights $ map (addMove tab) (allValidMoves tab)) dub table
+
+-- treci deo
+data GameState = Game Table | StopGame Table String
+
+instance Show GameState where
+  show (Game table) = show table
+  show (StopGame table string) = show table ++ string
+
+data GameStateOp a = GameStateOp {runGame :: GameState -> (a, GameState)}
+
+instance Functor GameStateOp where
+  fmap f (GameStateOp g) = GameStateOp fun
+    where
+      fun oldState = (f a, newState)
+        where
+          (a, newState) = g oldState
+
+instance Applicative GameStateOp where
+  pure a = GameStateOp (\state -> (a, state))
+  GameStateOp f' <*> GameStateOp a' = GameStateOp fun
+    where
+      fun state = (f a, newnewState)
+        where
+          (f, newState) = f' state
+          (a, newnewState) = a' newState
+
+instance Monad GameStateOp where
+  GameStateOp a' >>= fun = GameStateOp funkc
+    where
+      funkc state = runGame (fun a) newState
+        where
+          (a, newState) = a' state
+
+applyMove :: Int -> GameStateOp ()
+applyMove kol = GameStateOp fun
+  where
+    fun :: GameState -> ((), GameState)
+    fun (StopGame table str) = ((), StopGame table str)
+    fun (Game table) = ((), pom (addMove table kol))
+      where
+        pom :: Either String Table -> GameState
+        pom (Left str) = StopGame table str
+        pom (Right table) = Game table
+
+applyMoves :: [Int] -> GameStateOp ()
+applyMoves [] = return ()
+applyMoves (x : xs) = applyMove x >> applyMoves xs
+
+testGame :: GameState
+testGame = snd $ runGame (applyMoves [1, 2, 2, 1, 1]) (Game (Table 3 3 [[P, P, P, P], [P, P, P, P], [P, P, P, P], [P, P, P, P]] Red))
+
+-- parsiranje
+parserGame :: Parsec String () GameState
+parserGame = do
+  p1 <- parser
+  p2 <- movesParser
+  return (snd $ runGame (applyMoves p2) (Game p1))
+
+parser :: Parsec String () Table
+parser = do
+  table <-
+    many1
+      ( do
+          char '|'
+          manyTill
+            ( do
+                s <- state
+                char '|'
+                return s
+            )
+            (string "\n")
+      )
+  let i = length table - 1
+  let j = length (head table) - 1
+  return (Table i j table Yellow)
+
+movesParser :: Parsec String () [Int]
+movesParser = do
+  manyTill number eof
+
+number :: Parsec String () Int
+number = do
+  spaces
+  num <- many1 digit
+  spaces
+  return (read num)
+
+state :: Parsec String () State
+state = fmap convert (oneOf " CZ")
+
+convert :: Char -> State
+convert ' ' = P
+convert 'C' = C
+convert 'Z' = Z
+
+main :: IO ()
+main = do
+  input <- readFile "unos.txt"
+  if null input
+    then return ()
+    else do
+      case runParser parserGame () "unos.txt" input of
+        Right x -> print x
+        Left x -> print x
