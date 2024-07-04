@@ -4,6 +4,7 @@
 {-# HLINT ignore "Use tuple-section" #-}
 {-# HLINT ignore "Use foldr" #-}
 {-# HLINT ignore "Use <$>" #-}
+{-# HLINT ignore "Avoid lambda using `infix`" #-}
 
 import Data.Either (rights)
 import Data.List
@@ -82,7 +83,7 @@ allValidMoves (Table i j state player) =
 addMove :: Table -> Int -> Either String Table
 addMove table@(Table i j state player) kol
   | checkIfOver table = Left "Game is already finished"
-  | kol `notElem` allValidMoves table = Left "Bad move"
+  | kol `notElem` allValidMoves table = Left "Column unvailable"
   | otherwise = Right (Table i j mat (other player))
   where
     mat = transpose [if index == kol then reverse $ put player kol (reverse kolona) else kolona | (index, kolona) <- zip [1 ..] (transpose state)]
@@ -130,61 +131,66 @@ generateBigTree :: Table -> Int -> Rose Table
 generateBigTree table dub = generateRose (\tab -> rights $ map (addMove tab) (allValidMoves tab)) dub table
 
 -- treci deo
-data GameState = Game Table | StopGame Table String
+data ResultState a = SuccessGame Table a | StopGame Table String
 
-instance Show GameState where
-  show (Game table) = show table
+instance Show (ResultState a) where
   show (StopGame table string) = show table ++ string
+  show (SuccessGame table _) = show table
 
-data GameStateOp a = GameStateOp {runGame :: GameState -> (a, GameState)}
+data GameStateOp a = GameStateOp {runGame :: Table -> ResultState a}
 
 instance Functor GameStateOp where
   fmap f (GameStateOp g) = GameStateOp fun
     where
-      fun oldState = (f a, newState)
+      fun oldState = res
         where
-          (a, newState) = g oldState
+          res = pom (g oldState)
+          pom (SuccessGame table a) = SuccessGame table (f a)
+          pom (StopGame table string) = StopGame table string
 
 instance Applicative GameStateOp where
-  pure a = GameStateOp (\state -> (a, state))
+  pure a = GameStateOp (\table -> SuccessGame table a)
   GameStateOp f' <*> GameStateOp a' = GameStateOp fun
     where
-      fun state = (f a, newnewState)
-        where
-          (f, newState) = f' state
-          (a, newnewState) = a' newState
+      fun state =
+        case f' state of
+          StopGame table str -> StopGame table str
+          SuccessGame newState f ->
+            case a' newState of
+              StopGame table str -> StopGame table str
+              SuccessGame newnewState a -> SuccessGame newnewState (f a)
 
 instance Monad GameStateOp where
   GameStateOp a' >>= fun = GameStateOp funkc
     where
-      funkc state = runGame (fun a) newState
-        where
-          (a, newState) = a' state
+      funkc state =
+        case a' state of
+          StopGame table str -> StopGame table str
+          SuccessGame newState a -> runGame (fun a) newState
 
 applyMove :: Int -> GameStateOp ()
 applyMove kol = GameStateOp fun
   where
-    fun :: GameState -> ((), GameState)
-    fun (StopGame table str) = ((), StopGame table str)
-    fun (Game table) = ((), pom (addMove table kol))
+    fun :: Table -> ResultState ()
+    fun table = pom (addMove table kol)
       where
-        pom :: Either String Table -> GameState
+        pom :: Either String Table -> ResultState ()
         pom (Left str) = StopGame table str
-        pom (Right table) = Game table
+        pom (Right table) = SuccessGame table ()
 
 applyMoves :: [Int] -> GameStateOp ()
 applyMoves [] = return ()
 applyMoves (x : xs) = applyMove x >> applyMoves xs
 
-testGame :: GameState
-testGame = snd $ runGame (applyMoves [1, 2, 2, 1, 1]) (Game (Table 3 3 [[P, P, P, P], [P, P, P, P], [P, P, P, P], [P, P, P, P]] Red))
+testGame :: ResultState ()
+testGame = runGame (applyMoves [1, 2, 2, 1, 1]) (Table 3 3 [[P, P, P, P], [P, P, P, P], [P, P, P, P], [P, P, P, P]] Red)
 
 -- parsiranje
-parserGame :: Parsec String () GameState
+parserGame :: Parsec String () (ResultState ())
 parserGame = do
   p1 <- parser
   p2 <- movesParser
-  return (snd $ runGame (applyMoves p2) (Game p1))
+  return (runGame (applyMoves p2) p1)
 
 parser :: Parsec String () Table
 parser = do
@@ -229,6 +235,6 @@ main = do
   if null input
     then return ()
     else do
-      case runParser parserGame () "unos.txt" input of
+      case runParser parserGame () "" input of
         Right x -> print x
         Left x -> print x
